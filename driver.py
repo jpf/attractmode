@@ -4,6 +4,7 @@
 import sys
 import os
 import signal
+from Queue import Queue
 
 # visualization
 # import matplotlib.pyplot as plt
@@ -77,6 +78,8 @@ class retro_system_av_info(Structure):
     _fields_ = [("geometry", retro_game_geometry),
                 ("timing", retro_system_timing)]
 
+q = Queue()
+
 CORE_LIBRARY_PATH = "snes9x_next_libretro.dylib"
 ROM_PATH = sys.argv[1]
 
@@ -92,36 +95,48 @@ RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS = 65578
 
 RETRO_PIXEL_FORMAT_RGB565 = 2
 
+config = {}
+
 
 # Python functions wrapped as C function pointers
 @CFUNCTYPE(c_bool, c_uint, c_void_p)
 def environ_cb(cmd, data):
+    global config
     if cmd == RETRO_ENVIRONMENT_GET_OVERSCAN:
         pass
     elif cmd == RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
         level = cast(data, POINTER(c_uint)).contents.value
+        config['performance_level'] = level
         assert level == 7
     elif cmd == RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
-        print "PIXEL FORMAT"
-        format = cast(data, POINTER(c_int)).contents.value
-        print "pixel format:", format
-        assert format == RETRO_PIXEL_FORMAT_RGB565
-        return True
+        pixel_format = cast(data, POINTER(c_int)).contents.value
+        config['pixel_format'] = pixel_format
+        assert pixel_format == RETRO_PIXEL_FORMAT_RGB565
+        return True  # Why do we return here?
     elif cmd == RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         descriptors = cast(data, POINTER(retro_input_descriptor))
+        found = []
         i = 0
         while descriptors[i].description:
             d = descriptors[i]
-            print d.port, d.device, d.index, d.id, d.description
+            found.append({
+                'port': d.port,
+                'device': d.device,
+                'index': d.index,
+                'id': d.id,
+                'description': d.description,
+                })
             i += 1
+        # config['input_descriptors'] = found
     elif cmd == RETRO_ENVIRONMENT_SET_VARIABLES:
-        print "VARIABLES"
         variables = cast(data, POINTER(retro_variable))
         i = 0
+        found = {}
         while variables[i].key:
-            v = variables[i]
-            print v.key, "::", v.value
+            variable = variables[i]
+            found[variable.key] = variable.value
             i += 1
+        config['variables'] = found
     elif cmd == RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
         pass
     elif cmd == RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
@@ -131,7 +146,7 @@ def environ_cb(cmd, data):
     elif cmd == RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
         pass
     else:
-        print "UNHANDLED environ_cb", cmd
+        # print "UNHANDLED environ_cb", cmd
         pass
     return False
 
@@ -145,23 +160,21 @@ def poll_cb():
 def input_cb(port, device, index, id):
     return 0  # not pressed
 
-last_framebuffer = None
-
 
 @CFUNCTYPE(None, c_void_p, c_uint, c_uint, c_size_t)
 def video_cb(data, width, height, pitch):
-    print "video_cb", data, width, height, pitch
+    # print "video_cb", data, width, height, pitch
     pixels = cast(data, POINTER(c_ushort*512*1024))
 
-    global last_framebuffer
-    last_framebuffer = pixels.contents
+    global q
+    q.put(pixels.contents)
 
 
 @CFUNCTYPE(c_size_t, c_void_p, c_size_t)
 def audio_batch_cb(data, frames):
-    print "audio_batch_cb", frames
+    # print "audio_batch_cb", frames
     samples = cast(data, POINTER(c_ushort))
-    print "a sample:", samples[100]
+    # print "a sample:", samples[100]
     return 0  # ignored in snes9x_next core
 
 # LOAD THE DYNAMIC LIBRARY
@@ -173,26 +186,26 @@ assert core.retro_api_version() == 1
 # SYSTEM INFO
 system_info = retro_system_info()
 core.retro_get_system_info(byref(system_info))
-print "SYSTEM INFO"
-print "library_name:", system_info.library_name
-print "library_version:", system_info.library_version
-print "valid_extensions:", system_info.valid_extensions
-print "need_fullpath?", system_info.need_fullpath
-print "block_extract?", system_info.block_extract
-
+config['system_info'] = {
+    "library_name": system_info.library_name,
+    "library_version": system_info.library_version,
+    "valid_extensions": system_info.valid_extensions,
+    "need_fullpath?": system_info.need_fullpath,
+    "block_extract?": system_info.block_extract,
+}
 
 # AV INFO
 av_info = retro_system_av_info()
 core.retro_get_system_av_info(byref(av_info))
-print "AV INFO"
-print "base_width:", av_info.geometry.base_width
-print "base_height:", av_info.geometry.base_height
-print "max_width:", av_info.geometry.max_width
-print "max_height:", av_info.geometry.max_height
-print "aspect_ratio:", av_info.geometry.aspect_ratio
-print "fps:", av_info.timing.fps
-print "sample_rate:", av_info.timing.sample_rate
-
+config['av_info'] = {
+    "base_width": av_info.geometry.base_width,
+    "base_height": av_info.geometry.base_height,
+    "max_width": av_info.geometry.max_width,
+    "max_height": av_info.geometry.max_height,
+    "aspect_ratio": av_info.geometry.aspect_ratio,
+    "fps": av_info.timing.fps,
+    "sample_rate": av_info.timing.sample_rate,
+}
 
 # REGISTER CALLBACKS (so far, each of these seems to be required)
 core.retro_set_environment(environ_cb)
@@ -202,7 +215,6 @@ core.retro_set_video_refresh(video_cb)
 core.retro_set_audio_sample_batch(audio_batch_cb)
 
 # INIT
-
 core.retro_init()
 
 # LOAD GAME
@@ -219,14 +231,14 @@ game.meta = None
 
 core.retro_load_game.restype = c_bool
 game_loaded = core.retro_load_game(byref(game))
-print "game loaded?", game_loaded
+# print "game loaded?", game_loaded
 
 
 # SERIALIZATION (not used for now)
 
 core.retro_serialize_size.restype = c_size_t
 serialize_size = core.retro_serialize_size()
-print "retro_serialize_size:", serialize_size
+# print "retro_serialize_size:", serialize_size
 
 core.retro_serialize.argtypes = [c_void_p, c_size_t]
 core.retro_serialize.restype = c_bool
@@ -247,10 +259,18 @@ signal.signal(signal.SIGINT, interrupt)
 
 serialize_buffer = (c_char*serialize_size)()
 
-while not simulation_done:
-    print ""
-    print "step:", step
+
+def get_framebuffer():
     core.retro_run()
+    return q.get()
+
+# import pprint
+# print "CONFIG"
+# pprint.pprint(config)
+
+while not simulation_done:
+    # print "step:", step
+    last_framebuffer = get_framebuffer()
     step += 1
 
     if step >= 3000 and step % 5 == 0:
@@ -280,10 +300,11 @@ while not simulation_done:
         #     interpolation='nearest',
         #     hold=False)
         # plt.pause(0.01)
+    simulation_done = True
 
 np.save("last_serialized.npy", np.frombuffer(serialize_buffer, dtype=np.uint8))
 
-print "SIMULATION STOPPED"
+# print "SIMULATION STOPPED"
 
 core.retro_unload_game()
 core.retro_deinit()
