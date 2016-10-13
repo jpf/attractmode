@@ -1,6 +1,7 @@
 # PLAYING WITH LIBRETRO FROM PYTHON
 # Can I just build a dumb video in memory???
 
+import pprint
 import sys
 import os
 # import signal
@@ -87,6 +88,7 @@ CORE_LIBRARY_PATH = "snes9x_next_libretro.dylib"
 ROM_PATH = sys.argv[1]
 
 RETRO_ENVIRONMENT_GET_OVERSCAN = 2
+RETRO_ENVIRONMENT_GET_CAN_DUPE = 3
 RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL = 8
 RETRO_ENVIRONMENT_SET_PIXEL_FORMAT = 10
 RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS = 11
@@ -108,10 +110,12 @@ def environ_cb(cmd, data):
     config = {}
     if cmd == RETRO_ENVIRONMENT_GET_OVERSCAN:
         pass
+    elif cmd == RETRO_ENVIRONMENT_GET_CAN_DUPE:
+        pass
     elif cmd == RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
         level = cast(data, POINTER(c_uint)).contents.value
         config['performance_level'] = level
-        assert level == 7
+        # assert level == 7
     elif cmd == RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
         pixel_format = cast(data, POINTER(c_int)).contents.value
         config['pixel_format'] = pixel_format
@@ -150,7 +154,7 @@ def environ_cb(cmd, data):
     elif cmd == RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
         pass
     else:
-        # print "UNHANDLED environ_cb", cmd
+        print "UNHANDLED environ_cb", cmd
         pass
     environ_q.put(config)
     return False
@@ -192,10 +196,10 @@ def audio_batch_cb(data, frames):
     return 0  # ignored in snes9x_next core
 
 class Frame:
-    def __init__(self, framebuffer):
+    def __init__(self, config, framebuffer):
         self.framebuffer = framebuffer
-        self.width = 512
-        self.height = 512
+        self.height = config['av_info']['max_height']
+        self.width = config['av_info']['max_width']
         self.depth = 2
         self.framebuffer_size = self.width*self.height*self.depth
         self.pitch = self.height*self.depth
@@ -233,13 +237,10 @@ class Emulator:
             "need_fullpath?": system_info.need_fullpath,
             "block_extract?": system_info.block_extract,
         }
-
+        
         # AV INFO
         av_info = retro_system_av_info()
         self.core.retro_get_system_av_info(byref(av_info))
-        import pprint
-        print "AV INFO:"
-        pprint.pprint(av_info.geometry.__dict__)
         self.config['av_info'] = {
             "base_width": av_info.geometry.base_width,
             "base_height": av_info.geometry.base_height,
@@ -249,6 +250,8 @@ class Emulator:
             "fps": av_info.timing.fps,
             "sample_rate": av_info.timing.sample_rate,
         }
+        print "Configuration:"
+        pprint.pprint(self.config)
 
         # REGISTER CALLBACKS (so far, each of these seems to be required)
         self.core.retro_set_environment(environ_cb)
@@ -281,16 +284,18 @@ class Emulator:
 
         # SERIALIZATION (not used for now)
         # self.core.retro_serialize_size.restype = c_size_t
-        # serialize_size = core.retro_serialize_size()
-        # # print "retro_serialize_size:", serialize_size
+        # serialize_size = self.core.retro_serialize_size()
+        # print "retro_serialize_size:", serialize_size
         # self.core.retro_serialize.argtypes = [c_void_p, c_size_t]
         # self.core.retro_serialize.restype = c_bool
 
     def next(self):
+        # print "Running next()"
         self.core.retro_run()
+        # print "incremnt frame number"
         self.frame_number += 1
         global video_q
-        self.frame = Frame(video_q.get())
+        self.frame = Frame(self.config, video_q.get())
 
     def stop(self):
         self.core.retro_unload_game()

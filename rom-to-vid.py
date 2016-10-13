@@ -7,11 +7,12 @@ import nostalgiapile
 
 
 CORE_LIBRARY_PATH = ("/Applications/RetroArch.app"
-                     "/Contents/Resources/cores/snes9x2010_libretro.dylib")
-ROM_PATH = sys.argv[1]
+                     "/Contents/Resources/cores/"
+                     "{}_libretro.dylib".format(sys.argv[1]))
+ROM_PATH = sys.argv[2]
 
 # Nice set of frames:
-frame_start = 353
+frame_start = int(sys.argv[3])
 duration_seconds = 2
 
 emu = nostalgiapile.Emulator(CORE_LIBRARY_PATH)
