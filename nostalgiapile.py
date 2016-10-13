@@ -6,6 +6,8 @@ import os
 # import signal
 from Queue import Queue
 
+import numpy as np
+
 # visualization
 # import matplotlib.pyplot as plt
 # import numpy as np
@@ -163,7 +165,16 @@ def poll_cb():
 def input_cb(port, device, index, id):
     return 0  # not pressed
 
-
+ # Render a frame. Pixel format is 15-bit 0RGB1555 native endian 
+ # unless changed (see RETRO_ENVIRONMENT_SET_PIXEL_FORMAT).
+ #
+ # Width and height specify dimensions of buffer.
+ # Pitch specifices length in bytes between two lines in buffer.
+ #
+ # For performance reasons, it is highly recommended to have a frame 
+ # that is packed in memory, i.e. pitch == width * byte_per_pixel.
+ # Certain graphic APIs, such as OpenGL ES, do not like textures 
+ # that are not packed in memory.
 @CFUNCTYPE(None, c_void_p, c_uint, c_uint, c_size_t)
 def video_cb(data, width, height, pitch):
     # print "video_cb", data, width, height, pitch
@@ -180,9 +191,31 @@ def audio_batch_cb(data, frames):
     # print "a sample:", samples[100]
     return 0  # ignored in snes9x_next core
 
+class Frame:
+    def __init__(self, framebuffer):
+        self.framebuffer = framebuffer
+        self.width = 512
+        self.height = 512
+        self.depth = 2
+        self.framebuffer_size = self.width*self.height*self.depth
+        self.pitch = self.height*self.depth
+
+    def to_numpy_array(self):
+        arr = np.frombuffer(
+            self.framebuffer,
+            dtype=np.uint16,
+            count=self.framebuffer_size
+        ).reshape((self.height, (self.pitch)))[0:224, 0:256].astype(np.uint32)
+        screen = np.zeros((224, 256, 3), dtype=np.uint8)
+        screen[:, :, 0] = (arr & 0xF800) >> 8
+        screen[:, :, 1] = (arr & 0x07E0) >> 3
+        screen[:, :, 2] = (arr & 0x001F) << 3
+        return screen
+
 
 class Emulator:
     def __init__(self, libretro_core_library_path):
+        self.frame_number = 0
         # LOAD THE DYNAMIC LIBRARY
         self.core = cdll.LoadLibrary(libretro_core_library_path)
 
@@ -204,6 +237,9 @@ class Emulator:
         # AV INFO
         av_info = retro_system_av_info()
         self.core.retro_get_system_av_info(byref(av_info))
+        import pprint
+        print "AV INFO:"
+        pprint.pprint(av_info.geometry.__dict__)
         self.config['av_info'] = {
             "base_width": av_info.geometry.base_width,
             "base_height": av_info.geometry.base_height,
@@ -249,3 +285,13 @@ class Emulator:
         # # print "retro_serialize_size:", serialize_size
         # self.core.retro_serialize.argtypes = [c_void_p, c_size_t]
         # self.core.retro_serialize.restype = c_bool
+
+    def next(self):
+        self.core.retro_run()
+        self.frame_number += 1
+        global video_q
+        self.frame = Frame(video_q.get())
+
+    def stop(self):
+        self.core.retro_unload_game()
+        self.core.retro_deinit()
