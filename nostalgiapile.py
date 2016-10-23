@@ -1,20 +1,17 @@
-# PLAYING WITH LIBRETRO FROM PYTHON
-# Can I just build a dumb video in memory???
-
+# Python interface into libretro
 import pprint
 import sys
+import signal
 import os
-# import signal
 from Queue import Queue
 
 import numpy as np
 
-# visualization
+# Visualization:
 # import matplotlib.pyplot as plt
 # import numpy as np
 
-# We'll use ctypes to access the libretro C API exposed by the
-# snes9x_next core
+# We'll use ctypes to access the libretro C API exposed by the snes9x_next core
 from ctypes import (CFUNCTYPE,
                     POINTER,
                     Structure,
@@ -35,7 +32,7 @@ from ctypes import (CFUNCTYPE,
                     cdll)
 
 
-# structs from libretro.h
+# Structs from libretro.h
 class retro_variable(Structure):
     _fields_ = [("key", c_char_p),
                 ("value", c_char_p)]
@@ -84,9 +81,6 @@ class retro_system_av_info(Structure):
 video_q = Queue()
 environ_q = Queue()
 
-CORE_LIBRARY_PATH = "snes9x_next_libretro.dylib"
-ROM_PATH = sys.argv[1]
-
 RETRO_ENVIRONMENT_GET_OVERSCAN = 2
 RETRO_ENVIRONMENT_GET_CAN_DUPE = 3
 RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL = 8
@@ -103,14 +97,18 @@ RETRO_PIXEL_FORMAT_RGB565 = 2
 config = {}
 
 
+def interrupt(sig, frame):
+    sys.exit(1)
+
+signal.signal(signal.SIGINT, interrupt)
+
+
 # Python functions wrapped as C function pointers
 @CFUNCTYPE(c_bool, c_uint, c_void_p)
 def environ_cb(cmd, data):
     global environ_q
     config = {}
     if cmd == RETRO_ENVIRONMENT_GET_OVERSCAN:
-        pass
-    elif cmd == RETRO_ENVIRONMENT_GET_CAN_DUPE:
         pass
     elif cmd == RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
         level = cast(data, POINTER(c_uint)).contents.value
@@ -120,7 +118,7 @@ def environ_cb(cmd, data):
         pixel_format = cast(data, POINTER(c_int)).contents.value
         config['pixel_format'] = pixel_format
         assert pixel_format == RETRO_PIXEL_FORMAT_RGB565
-        # return True  # Why did we return here?
+        return True  # "Yes, we support this pixel format"
     elif cmd == RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         descriptors = cast(data, POINTER(retro_input_descriptor))
         found = []
@@ -167,22 +165,24 @@ def poll_cb():
 
 @CFUNCTYPE(c_short, c_uint, c_uint, c_uint, c_uint)
 def input_cb(port, device, index, id):
-    return 0  # not pressed
+    return 0  # "not pressed"
 
- # Render a frame. Pixel format is 15-bit 0RGB1555 native endian 
- # unless changed (see RETRO_ENVIRONMENT_SET_PIXEL_FORMAT).
- #
- # Width and height specify dimensions of buffer.
- # Pitch specifices length in bytes between two lines in buffer.
- #
- # For performance reasons, it is highly recommended to have a frame 
- # that is packed in memory, i.e. pitch == width * byte_per_pixel.
- # Certain graphic APIs, such as OpenGL ES, do not like textures 
- # that are not packed in memory.
+
+# Render a frame. Pixel format is 15-bit 0RGB1555 native endian
+# unless changed (see RETRO_ENVIRONMENT_SET_PIXEL_FORMAT).
+#
+# Width and height specify dimensions of buffer.
+# Pitch specifices length in bytes between two lines in buffer.
+#
+# For performance reasons, it is highly recommended to have a frame
+# that is packed in memory, i.e. pitch == width * byte_per_pixel.
+# Certain graphic APIs, such as OpenGL ES, do not like textures
+# that are not packed in memory.
 @CFUNCTYPE(None, c_void_p, c_uint, c_uint, c_size_t)
 def video_cb(data, width, height, pitch):
     # print "video_cb", data, width, height, pitch
     pixels = cast(data, POINTER(c_ushort*512*1024))
+    # pixels = cast(data, POINTER(c_ushort*224*240*2))
 
     global video_q
     video_q.put(pixels.contents)
@@ -195,22 +195,26 @@ def audio_batch_cb(data, frames):
     # print "a sample:", samples[100]
     return 0  # ignored in snes9x_next core
 
+
 class Frame:
     def __init__(self, config, framebuffer):
         self.framebuffer = framebuffer
-        self.height = config['av_info']['max_height']
-        self.width = config['av_info']['max_width']
+        self.max_height = int(config['av_info']['max_height'])
+        self.max_width = int(config['av_info']['max_width'])
+        self.height = int(config['av_info']['base_height'])
+        self.width = int(config['av_info']['base_width'])
         self.depth = 2
-        self.framebuffer_size = self.width*self.height*self.depth
-        self.pitch = self.height*self.depth
+        self.pitch = self.max_width*self.depth
+        self.framebuffer_size = self.max_width*self.max_height*self.depth
 
     def to_numpy_array(self):
         arr = np.frombuffer(
             self.framebuffer,
             dtype=np.uint16,
             count=self.framebuffer_size
-        ).reshape((self.height, (self.pitch)))[0:224, 0:256].astype(np.uint32)
-        screen = np.zeros((224, 256, 3), dtype=np.uint8)
+        ).reshape((self.max_height,
+                   self.pitch))[0:self.height, 0:self.width].astype(np.uint32)
+        screen = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         screen[:, :, 0] = (arr & 0xF800) >> 8
         screen[:, :, 1] = (arr & 0x07E0) >> 3
         screen[:, :, 2] = (arr & 0x001F) << 3
@@ -220,13 +224,13 @@ class Frame:
 class Emulator:
     def __init__(self, libretro_core_library_path):
         self.frame_number = 0
-        # LOAD THE DYNAMIC LIBRARY
+        # Load the dynamic library
         self.core = cdll.LoadLibrary(libretro_core_library_path)
 
-        # API VERSION
+        # API version
         assert self.core.retro_api_version() == 1
 
-        # SYSTEM INFO
+        # System info
         system_info = retro_system_info()
         self.core.retro_get_system_info(byref(system_info))
         self.config = {}
@@ -237,8 +241,8 @@ class Emulator:
             "need_fullpath?": system_info.need_fullpath,
             "block_extract?": system_info.block_extract,
         }
-        
-        # AV INFO
+
+        # A/V info
         av_info = retro_system_av_info()
         self.core.retro_get_system_av_info(byref(av_info))
         self.config['av_info'] = {
@@ -253,20 +257,20 @@ class Emulator:
         print "Configuration:"
         pprint.pprint(self.config)
 
-        # REGISTER CALLBACKS (so far, each of these seems to be required)
+        # Register callbacks (so far, each of these seems to be required)
         self.core.retro_set_environment(environ_cb)
         self.core.retro_set_input_poll(poll_cb)
         self.core.retro_set_input_state(input_cb)
         self.core.retro_set_video_refresh(video_cb)
         self.core.retro_set_audio_sample_batch(audio_batch_cb)
 
-        # INIT
+        # Init
         self.core.retro_init()
 
         self.game = None
 
     def load_game(self, rom_path):
-        # LOAD GAME
+        # Load game
         byte_count = os.path.getsize(rom_path)
         rom_bytes = (c_byte * byte_count)()
         with open(rom_path, "r") as f:
@@ -282,7 +286,8 @@ class Emulator:
         game_loaded = self.core.retro_load_game(byref(self.game))
         print "game loaded?", game_loaded
 
-        # SERIALIZATION (not used for now)
+        # Serialization (not used for now):
+        #
         # self.core.retro_serialize_size.restype = c_size_t
         # serialize_size = self.core.retro_serialize_size()
         # print "retro_serialize_size:", serialize_size
@@ -290,12 +295,13 @@ class Emulator:
         # self.core.retro_serialize.restype = c_bool
 
     def next(self):
-        # print "Running next()"
         self.core.retro_run()
-        # print "incremnt frame number"
         self.frame_number += 1
         global video_q
         self.frame = Frame(self.config, video_q.get())
+
+    def __getitem__(self, blah):
+        return self.next()
 
     def stop(self):
         self.core.retro_unload_game()
